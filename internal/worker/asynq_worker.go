@@ -74,6 +74,23 @@ func (c *Consumer) handleOrderStatusEmail(_ context.Context, task *asynq.Task) e
 		logger.Debugw("worker_order_status_email_skip_invalid_payload", "order_id", payload.OrderID)
 		return nil
 	}
+	// 消费侧二次校验开关：避免 SMTP/订单通知关闭后，旧任务（含 retry/scheduled 中的任务）继续触发发送。
+	if c.SettingService != nil && c.Config != nil {
+		smtpSetting, smtpErr := c.SettingService.GetSMTPSetting(c.Config.Email)
+		if smtpErr != nil {
+			// fail-closed：读不到设置就视作关闭，不重试，避免 DB 抖动放大成邮件雪崩。
+			logger.Warnw("worker_order_status_email_load_smtp_setting_failed", "order_id", payload.OrderID, "error", smtpErr)
+			return nil
+		}
+		if !smtpSetting.Enabled || !smtpSetting.OrderNotificationEnabled {
+			logger.Debugw("worker_order_status_email_skip_setting_disabled",
+				"order_id", payload.OrderID,
+				"smtp_enabled", smtpSetting.Enabled,
+				"order_notification_enabled", smtpSetting.OrderNotificationEnabled,
+			)
+			return nil
+		}
+	}
 	order, err := c.OrderRepo.GetByID(payload.OrderID)
 	if err != nil {
 		logger.Warnw("worker_order_status_email_fetch_order_failed", "order_id", payload.OrderID, "error", err)
@@ -82,6 +99,21 @@ func (c *Consumer) handleOrderStatusEmail(_ context.Context, task *asynq.Task) e
 	if order == nil {
 		logger.Debugw("worker_order_status_email_skip_order_not_found", "order_id", payload.OrderID)
 		return nil
+	}
+	// 游客订单的"取消"通知价值极低（用户大概率已离开），但极易被滥用为退信轰炸载体：
+	// 攻击者可用伪造邮箱批量下单等过期取消触发发送。统一不发，保留登录用户与其它状态。
+	if order.UserID == 0 {
+		emailStatus := strings.TrimSpace(payload.Status)
+		if emailStatus == "" {
+			emailStatus = order.Status
+		}
+		if emailStatus == constants.OrderStatusCanceled {
+			logger.Debugw("worker_order_status_email_skip_guest_canceled",
+				"order_id", order.ID,
+				"order_no", order.OrderNo,
+			)
+			return nil
+		}
 	}
 	var receiverEmail string
 	var locale string
