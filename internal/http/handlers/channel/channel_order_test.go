@@ -242,6 +242,118 @@ func TestCreateOrderRequestBindsAffiliateFields(t *testing.T) {
 	}
 }
 
+func TestBuildChannelPaymentResponse_ProviderModeMatrix(t *testing.T) {
+	type wantUSDT struct {
+		address string
+		amount  string
+	}
+	tests := []struct {
+		name            string
+		providerType    string
+		channelType     string
+		interactionMode string
+		payload         models.JSON
+		wantUSDT        *wantUSDT // nil => no wallet_address/chain_amount keys expected
+	}{
+		{name: "alipay qr", providerType: constants.PaymentProviderOfficial, channelType: constants.PaymentChannelTypeAlipay, interactionMode: constants.PaymentInteractionQR},
+		{name: "alipay wap", providerType: constants.PaymentProviderOfficial, channelType: constants.PaymentChannelTypeAlipay, interactionMode: constants.PaymentInteractionWAP},
+		{name: "alipay page", providerType: constants.PaymentProviderOfficial, channelType: constants.PaymentChannelTypeAlipay, interactionMode: constants.PaymentInteractionPage},
+		{name: "wechat qr", providerType: constants.PaymentProviderOfficial, channelType: constants.PaymentChannelTypeWechat, interactionMode: constants.PaymentInteractionQR},
+		{name: "wechat redirect", providerType: constants.PaymentProviderOfficial, channelType: constants.PaymentChannelTypeWechat, interactionMode: constants.PaymentInteractionRedirect},
+		{name: "epay qr", providerType: constants.PaymentProviderEpay, channelType: "", interactionMode: constants.PaymentInteractionQR},
+		{name: "epay redirect", providerType: constants.PaymentProviderEpay, channelType: "", interactionMode: constants.PaymentInteractionRedirect},
+		{
+			name:            "bepusdt qr with usdt payload",
+			providerType:    constants.PaymentProviderBepusdt,
+			channelType:     "",
+			interactionMode: constants.PaymentInteractionQR,
+			payload:         models.JSON{"data": map[string]any{"token": "TBepAddr", "actual_amount": "13.45"}},
+			wantUSDT:        &wantUSDT{address: "TBepAddr", amount: "13.45"},
+		},
+		{name: "bepusdt redirect", providerType: constants.PaymentProviderBepusdt, channelType: "", interactionMode: constants.PaymentInteractionRedirect, payload: models.JSON{"data": map[string]any{"token": "TBepAddr", "actual_amount": "13.45"}}},
+		{
+			name:            "epusdt qr with receive_address payload",
+			providerType:    constants.PaymentProviderEpusdt,
+			channelType:     "",
+			interactionMode: constants.PaymentInteractionQR,
+			payload:         models.JSON{"data": map[string]any{"receive_address": "TEpusdtAddr", "actual_amount": "9.99"}},
+			wantUSDT:        &wantUSDT{address: "TEpusdtAddr", amount: "9.99"},
+		},
+		{
+			name:            "epusdt qr without receive_address still surfaces chain amount",
+			providerType:    constants.PaymentProviderEpusdt,
+			channelType:     "",
+			interactionMode: constants.PaymentInteractionQR,
+			payload:         models.JSON{"data": map[string]any{"actual_amount": "5.00"}},
+			wantUSDT:        &wantUSDT{address: "", amount: "5.00"},
+		},
+		{name: "epusdt redirect", providerType: constants.PaymentProviderEpusdt, channelType: "", interactionMode: constants.PaymentInteractionRedirect},
+		{name: "okpay qr", providerType: constants.PaymentProviderOkpay, channelType: "", interactionMode: constants.PaymentInteractionQR},
+		{name: "okpay redirect", providerType: constants.PaymentProviderOkpay, channelType: "", interactionMode: constants.PaymentInteractionRedirect},
+		{name: "stripe redirect", providerType: constants.PaymentProviderOfficial, channelType: constants.PaymentChannelTypeStripe, interactionMode: constants.PaymentInteractionRedirect},
+		{name: "paypal redirect", providerType: constants.PaymentProviderOfficial, channelType: constants.PaymentChannelTypePaypal, interactionMode: constants.PaymentInteractionRedirect},
+		{name: "tokenpay qr", providerType: constants.PaymentProviderTokenpay, channelType: "", interactionMode: constants.PaymentInteractionQR},
+		{name: "tokenpay redirect", providerType: constants.PaymentProviderTokenpay, channelType: "", interactionMode: constants.PaymentInteractionRedirect},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			channelType := tc.channelType
+			if channelType == "" {
+				channelType = "test-channel-type"
+			}
+			payment := &models.Payment{
+				ID:              1,
+				OrderID:         2,
+				ChannelID:       3,
+				ProviderType:    tc.providerType,
+				ChannelType:     channelType,
+				InteractionMode: tc.interactionMode,
+				Status:          constants.PaymentStatusPending,
+				Amount:          models.NewMoneyFromDecimal(decimal.RequireFromString("100")),
+				FeeRate:         models.Money{},
+				FeeAmount:       models.Money{},
+				Currency:        "CNY",
+				PayURL:          "https://pay.example.com/c/abc",
+				QRCode:          "https://pay.example.com/c/abc-qr",
+				ProviderPayload: tc.payload,
+			}
+			resp := buildChannelPaymentResponse(nil, payment)
+			if got := resp["interaction_mode"]; got != tc.interactionMode {
+				t.Errorf("interaction_mode: got %v want %v", got, tc.interactionMode)
+			}
+			if got := resp["pay_url"]; got != "https://pay.example.com/c/abc" {
+				t.Errorf("pay_url: got %v", got)
+			}
+			if got := resp["qr_code"]; got != "https://pay.example.com/c/abc-qr" {
+				t.Errorf("qr_code: got %v", got)
+			}
+			if tc.wantUSDT == nil {
+				if _, ok := resp["wallet_address"]; ok {
+					t.Errorf("wallet_address should be absent, got %v", resp["wallet_address"])
+				}
+				if _, ok := resp["chain_amount"]; ok {
+					t.Errorf("chain_amount should be absent, got %v", resp["chain_amount"])
+				}
+				return
+			}
+			if tc.wantUSDT.address == "" {
+				if _, ok := resp["wallet_address"]; ok {
+					t.Errorf("wallet_address should be absent, got %v", resp["wallet_address"])
+				}
+			} else if got := resp["wallet_address"]; got != tc.wantUSDT.address {
+				t.Errorf("wallet_address: got %v want %v", got, tc.wantUSDT.address)
+			}
+			if tc.wantUSDT.amount == "" {
+				if _, ok := resp["chain_amount"]; ok {
+					t.Errorf("chain_amount should be absent, got %v", resp["chain_amount"])
+				}
+			} else if got := resp["chain_amount"]; got != tc.wantUSDT.amount {
+				t.Errorf("chain_amount: got %v want %v", got, tc.wantUSDT.amount)
+			}
+		})
+	}
+}
+
 func TestBuildChannelPaymentResponse_USDTQRExposesWalletFields(t *testing.T) {
 	payment := &models.Payment{
 		ID:              42,
