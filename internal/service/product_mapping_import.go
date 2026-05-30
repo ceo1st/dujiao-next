@@ -310,11 +310,28 @@ func convertUpstreamWholesalePrices(tiers models.WholesalePriceTiers, exchangeRa
 		return models.WholesalePriceTiers{}
 	}
 	converted := make([]WholesalePriceInput, 0, len(tiers))
-	for _, tier := range tiers {
+	skipped := 0
+	for idx, tier := range tiers {
 		if tier.MinQuantity <= 0 || tier.UnitPrice.Decimal.LessThanOrEqual(decimal.Zero) {
+			skipped++
+			logger.Warnw("convert_upstream_wholesale_price_invalid",
+				"index", idx,
+				"min_quantity", tier.MinQuantity,
+				"unit_price", tier.UnitPrice.String(),
+			)
 			continue
 		}
 		localPrice := CalculateLocalPrice(tier.UnitPrice.Decimal, exchangeRate, markupPercent, roundingMode)
+		if localPrice.LessThanOrEqual(decimal.Zero) {
+			skipped++
+			logger.Warnw("convert_upstream_wholesale_price_invalid",
+				"index", idx,
+				"min_quantity", tier.MinQuantity,
+				"unit_price", tier.UnitPrice.String(),
+				"local_price", localPrice.String(),
+			)
+			continue
+		}
 		converted = append(converted, WholesalePriceInput{
 			MinQuantity: tier.MinQuantity,
 			UnitPrice:   localPrice,
@@ -322,7 +339,20 @@ func convertUpstreamWholesalePrices(tiers models.WholesalePriceTiers, exchangeRa
 	}
 	normalized, err := normalizeWholesalePriceInputs(converted)
 	if err != nil {
+		logger.Warnw("convert_upstream_wholesale_prices_failed",
+			"error", err,
+			"tier_count", len(tiers),
+			"valid_tier_count", len(converted),
+			"skipped_tier_count", skipped,
+		)
 		return models.WholesalePriceTiers{}
+	}
+	if skipped > 0 {
+		logger.Warnw("convert_upstream_wholesale_prices_skipped_invalid",
+			"tier_count", len(tiers),
+			"valid_tier_count", len(converted),
+			"skipped_tier_count", skipped,
+		)
 	}
 	return normalized
 }

@@ -28,9 +28,21 @@ func (h *Handler) GetAdminProducts(c *gin.Context) {
 	if stockStatus == "" {
 		stockStatus = c.Query("stock_staus")
 	}
+	hasWholesalePrices, err := parseWholesaleFilter(c.Query("wholesale"))
+	if err != nil {
+		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
+		return
+	}
+	if hasWholesalePrices == nil {
+		hasWholesalePrices, err = parseWholesaleFilter(c.Query("has_wholesale_prices"))
+		if err != nil {
+			shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
+			return
+		}
+	}
 
 	lowStockThreshold := h.SettingService.GetDashboardLowStockThreshold()
-	products, total, err := h.ProductService.ListAdmin(categoryID, search, fulfillmentType, stockStatus, lowStockThreshold, page, pageSize)
+	products, total, err := h.ProductService.ListAdmin(categoryID, search, fulfillmentType, stockStatus, hasWholesalePrices, lowStockThreshold, page, pageSize)
 	if err != nil {
 		shared.RespondError(c, response.CodeInternal, "error.product_fetch_failed", err)
 		return
@@ -45,6 +57,26 @@ func (h *Handler) GetAdminProducts(c *gin.Context) {
 
 	pagination := response.BuildPagination(page, pageSize, total)
 	response.SuccessWithPage(c, products, pagination)
+}
+
+func parseWholesaleFilter(raw string) (*bool, error) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	switch value {
+	case "", "all":
+		return nil, nil
+	case "1", "true", "yes", "on", "enabled", "has":
+		parsed := true
+		return &parsed, nil
+	case "0", "false", "no", "off", "disabled", "none":
+		parsed := false
+		return &parsed, nil
+	default:
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return nil, err
+		}
+		return &parsed, nil
+	}
 }
 
 // GetAdminProduct 获取商品详情 (Admin)
