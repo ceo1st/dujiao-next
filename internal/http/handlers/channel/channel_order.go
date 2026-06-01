@@ -9,6 +9,7 @@ import (
 
 	"github.com/dujiao-next/internal/constants"
 	"github.com/dujiao-next/internal/dto"
+	"github.com/dujiao-next/internal/http/handlers/shared"
 	"github.com/dujiao-next/internal/http/response"
 	"github.com/dujiao-next/internal/i18n"
 	"github.com/dujiao-next/internal/logger"
@@ -577,14 +578,7 @@ func (h *Handler) ListOrders(c *gin.Context) {
 		return
 	}
 
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "5"))
-	if page < 1 {
-		page = 1
-	}
-	if pageSize <= 0 || pageSize > 20 {
-		pageSize = 5
-	}
+	page, pageSize := shared.ParsePaginationWithBounds(c, "page", "page_size", 5, 20)
 	status := c.Query("status")
 	locale := channelLocaleValue(c, c.Query("locale"))
 

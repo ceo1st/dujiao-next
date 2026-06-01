@@ -29,9 +29,7 @@ type CreateMemberLevelRequest struct {
 
 // GetAdminMemberLevels 获取会员等级列表
 func (h *Handler) GetAdminMemberLevels(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePaginationWithKeys(c, "page", "page_size", 50)
 
 	var isActive *bool
 	if raw := c.Query("is_active"); raw != "" {

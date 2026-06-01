@@ -2,7 +2,6 @@ package admin
 
 import (
 	"errors"
-	"strconv"
 
 	"github.com/dujiao-next/internal/http/handlers/shared"
 	"github.com/dujiao-next/internal/http/response"
@@ -319,9 +318,7 @@ func (h *Handler) ListUpstreamProducts(c *gin.Context) {
 		return
 	}
 
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePaginationWithKeys(c, "page", "page_size", 50)
 
 	result, err := h.ProductMappingService.ListUpstreamProducts(connectionID, page, pageSize)
 	if err != nil {
