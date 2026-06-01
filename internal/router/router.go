@@ -394,6 +394,7 @@ func SetupRouter(cfg *config.Config, c *provider.Container) *gin.Engine {
 				authorized.PATCH("/card-secrets/batch-status", adminHandler.BatchUpdateCardSecretStatus)
 				authorized.POST("/card-secrets/batch-delete", adminHandler.BatchDeleteCardSecrets)
 				authorized.POST("/card-secrets/export", adminHandler.ExportCardSecrets)
+				authorized.POST("/card-secrets/export-available", adminHandler.ExportAvailableCardSecrets)
 				authorized.GET("/card-secrets/stats", adminHandler.GetCardSecretStats)
 				authorized.GET("/card-secrets/batches", adminHandler.GetCardSecretBatches)
 				authorized.GET("/card-secrets/template", adminHandler.GetCardSecretTemplate)
