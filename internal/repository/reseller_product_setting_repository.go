@@ -183,8 +183,17 @@ func (r *GormResellerProductSettingRepository) UpsertSetting(setting models.Rese
 		return nil, err
 	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		if err := r.db.Create(&setting).Error; err != nil {
+		isListed := setting.IsListed
+		if err := r.db.Select("*").Create(&setting).Error; err != nil {
 			return nil, err
+		}
+		if !isListed {
+			if err := r.db.Model(&models.ResellerProductSetting{}).
+				Where("id = ?", setting.ID).
+				Update("is_listed", false).Error; err != nil {
+				return nil, err
+			}
+			setting.IsListed = false
 		}
 		return &setting, nil
 	}

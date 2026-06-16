@@ -186,6 +186,51 @@ func newOrderResellerSnapshotFixture(t *testing.T) orderResellerSnapshotFixture 
 	}
 }
 
+func (f orderResellerSnapshotFixture) addResellerSnapshotProduct(t *testing.T, slug string, base decimal.Decimal, cost decimal.Decimal, fixedMarkup decimal.Decimal) (models.Product, models.ProductSKU) {
+	t.Helper()
+	product := models.Product{
+		CategoryID:      f.product.CategoryID,
+		Slug:            slug,
+		TitleJSON:       models.JSON{"zh-CN": slug},
+		PriceAmount:     models.NewMoneyFromDecimal(base),
+		PurchaseType:    constants.ProductPurchaseGuest,
+		FulfillmentType: constants.FulfillmentTypeManual,
+		IsActive:        true,
+		CreatedAt:       time.Now(),
+		UpdatedAt:       time.Now(),
+	}
+	if err := f.db.Create(&product).Error; err != nil {
+		t.Fatalf("create extra product failed: %v", err)
+	}
+	sku := models.ProductSKU{
+		ProductID:        product.ID,
+		SKUCode:          models.DefaultSKUCode,
+		PriceAmount:      models.NewMoneyFromDecimal(base),
+		CostPriceAmount:  models.NewMoneyFromDecimal(cost),
+		ManualStockTotal: constants.ManualStockUnlimited,
+		IsActive:         true,
+		CreatedAt:        time.Now(),
+		UpdatedAt:        time.Now(),
+	}
+	if err := f.db.Create(&sku).Error; err != nil {
+		t.Fatalf("create extra sku failed: %v", err)
+	}
+	if fixedMarkup.GreaterThanOrEqual(decimal.Zero) {
+		setting := models.ResellerProductSetting{
+			ResellerID:        f.profile.ID,
+			ProductID:         product.ID,
+			SKUID:             0,
+			IsListed:          true,
+			PricingMode:       models.ResellerPricingModeFixedMarkup,
+			FixedMarkupAmount: models.NewMoneyFromDecimal(fixedMarkup),
+		}
+		if err := f.db.Create(&setting).Error; err != nil {
+			t.Fatalf("create extra product-level setting failed: %v", err)
+		}
+	}
+	return product, sku
+}
+
 func (f orderResellerSnapshotFixture) createInput(userID uint) CreateOrderInput {
 	return CreateOrderInput{
 		UserID: userID,
@@ -291,6 +336,124 @@ func TestCreateOrderResellerWritesSnapshotAndTenantFields(t *testing.T) {
 	item, _ := items[0].(map[string]interface{})
 	if item["child_order_id"] == nil || item["order_item_id"] == nil {
 		t.Fatalf("snapshot item should include generated child/item ids: %+v", item)
+	}
+}
+
+func TestCreateOrderResellerRuntimePricesMatchPreviewAndSnapshotAcrossRuleSources(t *testing.T) {
+	f := newOrderResellerSnapshotFixture(t)
+	productWithProductRule, skuWithProductRule := f.addResellerSnapshotProduct(t, "reseller-order-product-rule", decimal.NewFromInt(80), decimal.NewFromInt(40), decimal.NewFromInt(25))
+	productWithProfileRule, skuWithProfileRule := f.addResellerSnapshotProduct(t, "reseller-order-profile-rule", decimal.NewFromInt(50), decimal.NewFromInt(25), decimal.NewFromInt(-1))
+
+	input := f.createInput(f.buyer.ID)
+	input.Items = []CreateOrderItem{
+		{ProductID: f.product.ID, SKUID: f.sku.ID, Quantity: 1},
+		{ProductID: productWithProductRule.ID, SKUID: skuWithProductRule.ID, Quantity: 2},
+		{ProductID: productWithProfileRule.ID, SKUID: skuWithProfileRule.ID, Quantity: 1},
+	}
+
+	preview, err := f.svc.PreviewOrder(input)
+	if err != nil {
+		t.Fatalf("PreviewOrder failed: %v", err)
+	}
+	if preview.TotalAmount.String() != "400.00" || preview.OriginalAmount.String() != "400.00" {
+		t.Fatalf("preview totals mismatch original=%s total=%s", preview.OriginalAmount.String(), preview.TotalAmount.String())
+	}
+	if preview.PromotionDiscountAmount.String() != "0.00" || preview.WholesaleDiscountAmount.String() != "0.00" || preview.DiscountAmount.String() != "0.00" {
+		t.Fatalf("reseller preview must not apply main discounts: %+v", preview)
+	}
+
+	order, err := f.svc.CreateOrder(input)
+	if err != nil {
+		t.Fatalf("CreateOrder failed: %v", err)
+	}
+	if order.TotalAmount.String() != preview.TotalAmount.String() {
+		t.Fatalf("order total should match preview total, order=%s preview=%s", order.TotalAmount.String(), preview.TotalAmount.String())
+	}
+	if order.ResellerProfitAmount.String() != "90.00" {
+		t.Fatalf("parent reseller profit mismatch: %s", order.ResellerProfitAmount.String())
+	}
+	if len(order.Children) != 3 {
+		t.Fatalf("expected 3 child orders, got %d", len(order.Children))
+	}
+
+	snapshot, err := f.resellerRepo.GetOrderSnapshotByOrderID(order.ID)
+	if err != nil {
+		t.Fatalf("GetOrderSnapshotByOrderID failed: %v", err)
+	}
+	if snapshot == nil {
+		t.Fatal("expected reseller order snapshot")
+	}
+	if snapshot.BaseAmount.String() != "310.00" || snapshot.ResellerAmount.String() != "400.00" || snapshot.ProfitAmount.String() != "90.00" {
+		t.Fatalf("snapshot totals mismatch base=%s reseller=%s profit=%s", snapshot.BaseAmount.String(), snapshot.ResellerAmount.String(), snapshot.ProfitAmount.String())
+	}
+	items, ok := snapshot.PricingSnapshotJSON["items"].([]interface{})
+	if !ok || len(items) != 3 {
+		t.Fatalf("expected 3 pricing snapshot items, got %#v", snapshot.PricingSnapshotJSON["items"])
+	}
+	seenSources := map[string]bool{}
+	for _, raw := range items {
+		item, ok := raw.(map[string]interface{})
+		if !ok {
+			if asJSON, ok := raw.(models.JSON); ok {
+				item = map[string]interface{}(asJSON)
+			} else {
+				t.Fatalf("unexpected pricing snapshot item type: %#v", raw)
+			}
+		}
+		source, _ := item["rule_source"].(string)
+		seenSources[source] = true
+		if fmt.Sprint(item["child_order_id"]) == "0" || fmt.Sprint(item["order_item_id"]) == "0" {
+			t.Fatalf("pricing snapshot item should contain child/order item ids: %+v", item)
+		}
+	}
+	for _, source := range []string{resellerRuleSourceSKU, resellerRuleSourceProduct, resellerRuleSourceProfile} {
+		if !seenSources[source] {
+			t.Fatalf("missing pricing snapshot source %q in %+v", source, seenSources)
+		}
+	}
+}
+
+func TestPreviewAndCreateOrderResellerRejectServicePersistedHiddenProductWithoutSnapshot(t *testing.T) {
+	f := newOrderResellerSnapshotFixture(t)
+	settingSvc := NewResellerProductSettingService(
+		repository.NewResellerProductSettingRepository(f.db),
+		f.resellerRepo,
+		repository.NewProductRepository(f.db),
+	)
+	if _, err := settingSvc.SaveUserProductSettings(f.owner.ID, f.product.ID, ResellerProductSettingSaveInput{
+		Settings: []ResellerProductSettingInput{
+			{SKUID: 0, IsListed: false, PricingMode: models.ResellerPricingModeInherit},
+		},
+	}); err != nil {
+		t.Fatalf("save hidden product through service failed: %v", err)
+	}
+
+	var hiddenRow models.ResellerProductSetting
+	if err := f.db.Where("reseller_id = ? AND product_id = ? AND sku_id = ?", f.profile.ID, f.product.ID, uint(0)).
+		First(&hiddenRow).Error; err != nil {
+		t.Fatalf("fetch hidden product row failed: %v", err)
+	}
+	if hiddenRow.IsListed {
+		t.Fatalf("hidden product service save should persist is_listed=false, got true: %+v", hiddenRow)
+	}
+
+	input := f.createInput(f.buyer.ID)
+	if _, err := f.svc.PreviewOrder(input); !errors.Is(err, ErrResellerProductNotListed) {
+		t.Fatalf("PreviewOrder expected ErrResellerProductNotListed, got %v", err)
+	}
+	if _, err := f.svc.CreateOrder(input); !errors.Is(err, ErrResellerProductNotListed) && !errors.Is(err, ErrOrderCreateFailed) {
+		t.Fatalf("CreateOrder expected reseller not listed/order create failed wrapper, got %v", err)
+	}
+	var orderCount int64
+	if err := f.db.Model(&models.Order{}).Count(&orderCount).Error; err != nil {
+		t.Fatalf("count orders failed: %v", err)
+	}
+	var snapshotCount int64
+	if err := f.db.Model(&models.ResellerOrderSnapshot{}).Count(&snapshotCount).Error; err != nil {
+		t.Fatalf("count snapshots failed: %v", err)
+	}
+	if orderCount != 0 || snapshotCount != 0 {
+		t.Fatalf("hidden reseller order should not create rows, orders=%d snapshots=%d", orderCount, snapshotCount)
 	}
 }
 

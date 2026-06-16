@@ -109,6 +109,33 @@ func TestResellerProductSettingServiceUserSaveValidatesAndReturnsEffectivePrices
 	}
 }
 
+func TestResellerProductSettingServicePersistsFirstHiddenSKUSetting(t *testing.T) {
+	db := openResellerProductSettingServiceTestDB(t)
+	user, profile, product, skus := seedResellerProductSettingServiceData(t, db)
+	svc := newResellerProductSettingServiceForTest(db)
+
+	detail, err := svc.SaveUserProductSettings(user.ID, product.ID, ResellerProductSettingSaveInput{
+		Settings: []ResellerProductSettingInput{
+			{SKUID: skus[0].ID, IsListed: false, PricingMode: models.ResellerPricingModeInherit},
+		},
+	})
+	if err != nil {
+		t.Fatalf("save hidden sku setting failed: %v", err)
+	}
+	if detail == nil {
+		t.Fatal("expected detail after hidden save")
+	}
+
+	var row models.ResellerProductSetting
+	if err := db.Where("reseller_id = ? AND product_id = ? AND sku_id = ?", profile.ID, product.ID, skus[0].ID).
+		First(&row).Error; err != nil {
+		t.Fatalf("fetch hidden sku setting failed: %v", err)
+	}
+	if row.IsListed {
+		t.Fatalf("expected first hidden sku save to persist is_listed=false, got true: %+v", row)
+	}
+}
+
 func TestResellerProductSettingServiceRejectsPriceBelowBase(t *testing.T) {
 	db := openResellerProductSettingServiceTestDB(t)
 	user, _, product, skus := seedResellerProductSettingServiceData(t, db)

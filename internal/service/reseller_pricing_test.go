@@ -408,6 +408,105 @@ func TestResellerPricingResolverAppliesPriorityAndDefaultMarkup(t *testing.T) {
 	}
 }
 
+func TestResellerPricingResolverRuntimePrioritySnapshotSources(t *testing.T) {
+	repo := &resellerPricingRepoStub{
+		profile: testResellerProfile(),
+		settings: []models.ResellerProductSetting{
+			{
+				ID:            1,
+				ResellerID:    10,
+				ProductID:     1,
+				SKUID:         0,
+				IsListed:      true,
+				PricingMode:   models.ResellerPricingModeMarkupPercent,
+				MarkupPercent: models.NewMoneyFromDecimal(decimal.NewFromInt(10)),
+			},
+			{
+				ID:               2,
+				ResellerID:       10,
+				ProductID:        1,
+				SKUID:            11,
+				IsListed:         true,
+				PricingMode:      models.ResellerPricingModeFixedPrice,
+				FixedPriceAmount: models.NewMoneyFromDecimal(decimal.NewFromInt(130)),
+			},
+			{
+				ID:                3,
+				ResellerID:        10,
+				ProductID:         2,
+				SKUID:             0,
+				IsListed:          true,
+				PricingMode:       models.ResellerPricingModeFixedMarkup,
+				FixedMarkupAmount: models.NewMoneyFromDecimal(decimal.NewFromInt(25)),
+			},
+		},
+		related: map[uint]bool{},
+	}
+	resolver := NewResellerPricingResolver(repo)
+	result := testOrderBuildResult(
+		struct {
+			productID uint
+			skuID     uint
+			base      decimal.Decimal
+			cost      decimal.Decimal
+			quantity  int
+		}{productID: 1, skuID: 11, base: decimal.NewFromInt(100), cost: decimal.NewFromInt(50), quantity: 1},
+		struct {
+			productID uint
+			skuID     uint
+			base      decimal.Decimal
+			cost      decimal.Decimal
+			quantity  int
+		}{productID: 2, skuID: 22, base: decimal.NewFromInt(80), cost: decimal.NewFromInt(40), quantity: 2},
+		struct {
+			productID uint
+			skuID     uint
+			base      decimal.Decimal
+			cost      decimal.Decimal
+			quantity  int
+		}{productID: 3, skuID: 33, base: decimal.NewFromInt(50), cost: decimal.NewFromInt(25), quantity: 1},
+	)
+
+	ctx, err := resolver.ApplyToOrderBuildResult(testResellerTenant(), 123, result)
+	if err != nil {
+		t.Fatalf("ApplyToOrderBuildResult failed: %v", err)
+	}
+	if len(ctx.Items) != 3 {
+		t.Fatalf("expected 3 pricing items, got %d", len(ctx.Items))
+	}
+	assertRuntimePricingItem := func(index int, source string, mode string, unit string, profit string) {
+		t.Helper()
+		item := ctx.Items[index]
+		if item.RuleSource != source || item.PricingMode != mode {
+			t.Fatalf("item %d source/mode mismatch: %+v", index, item)
+		}
+		if item.ResellerUnitAmount.StringFixed(2) != unit {
+			t.Fatalf("item %d reseller unit want %s got %s", index, unit, item.ResellerUnitAmount.StringFixed(2))
+		}
+		if item.ProfitAmount.StringFixed(2) != profit {
+			t.Fatalf("item %d profit want %s got %s", index, profit, item.ProfitAmount.StringFixed(2))
+		}
+	}
+	assertRuntimePricingItem(0, resellerRuleSourceSKU, models.ResellerPricingModeFixedPrice, "130.00", "30.00")
+	assertRuntimePricingItem(1, resellerRuleSourceProduct, models.ResellerPricingModeFixedMarkup, "105.00", "50.00")
+	assertRuntimePricingItem(2, resellerRuleSourceProfile, models.ResellerPricingModeMarkupPercent, "60.00", "10.00")
+
+	if ctx.BaseAmount.StringFixed(2) != "310.00" || ctx.ResellerAmount.StringFixed(2) != "400.00" || ctx.ProfitAmount.StringFixed(2) != "90.00" {
+		t.Fatalf("context totals mismatch base=%s reseller=%s profit=%s", ctx.BaseAmount, ctx.ResellerAmount, ctx.ProfitAmount)
+	}
+	items, ok := ctx.PricingSnapshot["items"].([]interface{})
+	if !ok || len(items) != 3 {
+		t.Fatalf("pricing snapshot items mismatch: %#v", ctx.PricingSnapshot["items"])
+	}
+	first, ok := items[0].(models.JSON)
+	if !ok {
+		t.Fatalf("pricing snapshot item type mismatch: %#v", items[0])
+	}
+	if first["rule_source"] != resellerRuleSourceSKU || first["pricing_mode"] != models.ResellerPricingModeFixedPrice {
+		t.Fatalf("pricing snapshot should record sku rule source and mode: %#v", first)
+	}
+}
+
 func TestResellerPricingResolverBlocksHiddenProductAndSKU(t *testing.T) {
 	tests := []struct {
 		name    string

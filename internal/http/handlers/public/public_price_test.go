@@ -255,6 +255,36 @@ func TestDecoratePublicProductForTenantHiddenProduct(t *testing.T) {
 	}
 }
 
+func TestDecoratePublicProductForTenantAllHiddenSKUsReturnsNotListed(t *testing.T) {
+	repo := &resellerPricingRepoForPublicTest{
+		profile: &models.ResellerProfile{ID: 10, UserID: 99, Status: models.ResellerProfileStatusActive},
+		settings: []models.ResellerProductSetting{
+			{ID: 1, ResellerID: 10, ProductID: 1, SKUID: 11, IsListed: false, PricingMode: models.ResellerPricingModeInherit},
+			{ID: 2, ResellerID: 10, ProductID: 1, SKUID: 12, IsListed: false, PricingMode: models.ResellerPricingModeInherit},
+		},
+	}
+	resolver := service.NewResellerPricingResolver(repo)
+	h := &Handler{Container: &provider.Container{ResellerPricingResolver: resolver}}
+	tenant := service.ResellerTenantContext("shop.example.test", 10, 99, "shop.example.test")
+	product := &models.Product{
+		ID:          1,
+		PriceAmount: models.NewMoneyFromDecimal(decimal.NewFromInt(100)),
+		SKUs: []models.ProductSKU{
+			{ID: 11, ProductID: 1, IsActive: true, PriceAmount: models.NewMoneyFromDecimal(decimal.NewFromInt(100)), CostPriceAmount: models.NewMoneyFromDecimal(decimal.NewFromInt(50))},
+			{ID: 12, ProductID: 1, IsActive: true, PriceAmount: models.NewMoneyFromDecimal(decimal.NewFromInt(120)), CostPriceAmount: models.NewMoneyFromDecimal(decimal.NewFromInt(60))},
+		},
+	}
+	batch, err := resolver.LoadDisplayPricingBatch(tenant, []models.Product{*product})
+	if err != nil {
+		t.Fatalf("LoadDisplayPricingBatch failed: %v", err)
+	}
+
+	_, err = h.decoratePublicProductForTenant(product, nil, tenant, batch)
+	if !errors.Is(err, service.ErrResellerProductNotListed) {
+		t.Fatalf("expected ErrResellerProductNotListed, got %v", err)
+	}
+}
+
 func TestDecoratePublicProductForTenantInvalidDisplayPricingIsHidden(t *testing.T) {
 	tests := []struct {
 		name    string
